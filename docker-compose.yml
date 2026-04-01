@@ -1,69 +1,82 @@
 version: '3.8'
 
 services:
-  # 后端服务 (例如 Node.js/Python/Go)
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: app-backend
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=production
-      - DB_HOST=db
-      - REDIS_HOST=redis
-    depends_on:
-      - db
-      - redis
-    networks:
-      - app-network
-    restart: unless-stopped
-
-  # 前端服务 (例如 Nginx 托管 React/Vue)
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: app-frontend
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-    networks:
-      - app-network
-    restart: unless-stopped
-
   # 数据库服务 (PostgreSQL)
   db:
     image: postgres:15-alpine
-    container_name: app-db
+    container_name: app_db
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: secure_password
-      POSTGRES_DB: app_db
+      POSTGRES_USER: ${DB_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}
+      POSTGRES_DB: ${DB_NAME:-appdb}
     volumes:
       - db_data:/var/lib/postgresql/data
     networks:
-      - app-network
-    restart: unless-stopped
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-admin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # 缓存服务 (Redis)
   redis:
     image: redis:7-alpine
-    container_name: app-redis
-    volumes:
-      - redis_data:/data
-    networks:
-      - app-network
+    container_name: app_redis
     restart: unless-stopped
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-# 定义自定义网络，实现容器间互通
+  # 后端服务 (Python/Node.js 示例)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: app_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-admin}:${DB_PASSWORD:-secret}@db:5432/${DB_NAME:-appdb}
+      REDIS_URL: redis://redis:6379
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_network
+    command: >
+      sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+      # 如果是 Node.js: "npm run start"
+
+  # 前端服务 (React/Vue 示例)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: app_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - app_network
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      # 如果是 Vue: VITE_API_URL: http://localhost:8000
+
 networks:
-  app-network:
+  app_network:
     driver: bridge
 
-# 定义持久化卷
 volumes:
   db_data:
-  redis_data:
