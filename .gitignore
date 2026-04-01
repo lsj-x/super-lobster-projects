@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+vendor/
+
+# 构建输出
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 日志
+*.log
+logs/
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 敏感信息
+*.key
+*.pem
+secrets/
+credentials/

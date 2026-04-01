@@ -1,0 +1,12 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+mmctl:
+  base_dir: "/data"
+  script_path: "/root/.openclaw/workspace/repos/helm_maigc2/mmctl.sh"
+  work_dir: "/data/clusters"
+
+log:
+  level: "info"
+  output: "stdout"
