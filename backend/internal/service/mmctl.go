@@ -284,6 +284,23 @@ func (s *MmctlService) Rollback(namespace, version string, logCallback func(stri
 	return nil
 }
 
+// Upgrade 升级命名空间到指定版本
+func (s *MmctlService) Upgrade(namespace, version string, logCallback func(string)) error {
+	logger.Info("开始升级", zap.String("namespace", namespace), zap.String("version", version))
+	args := []string{s.scriptPath, "89", "upgrade", namespace, version}
+	cmd := exec.Command("bash", args...)
+	cmd.Dir = s.baseDir
+	cmd.Stdout = &logWriter{callback: logCallback}
+	cmd.Stderr = &logWriter{callback: logCallback}
+	err := cmd.Run()
+	if err != nil {
+		logger.Error("升级失败", zap.Error(err))
+		return fmt.Errorf("升级失败：%w", err)
+	}
+	logger.Info("升级成功", zap.String("namespace", namespace), zap.String("version", version))
+	return nil
+}
+
 // logWriter 实现 io.Writer 用于日志回调
 type logWriter struct {
 	callback func(string)
