@@ -1,4 +1,4 @@
-package mmctl
+package service
 
 import (
 	"bufio"
@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"modelmagic-deploy-console/backend/internal/logger"
 
@@ -262,4 +261,37 @@ func (s *MmctlService) UpdateNamespaceConfig(namespace string, updates map[strin
 	
 	logger.Info("配置更新成功", zap.String("namespace", namespace))
 	return nil
+}
+
+// Rollback 回滚命名空间到指定版本
+func (s *MmctlService) Rollback(namespace, version string, logCallback func(string)) error {
+	logger.Info("开始回滚", zap.String("namespace", namespace), zap.String("version", version))
+	
+	args := []string{s.scriptPath, "90", namespace, version}
+	cmd := exec.Command("bash", args...)
+	cmd.Dir = s.baseDir
+	
+	cmd.Stdout = &logWriter{callback: logCallback}
+	cmd.Stderr = &logWriter{callback: logCallback}
+	
+	err := cmd.Run()
+	if err != nil {
+		logger.Error("回滚失败", zap.Error(err))
+		return fmt.Errorf("回滚失败：%w", err)
+	}
+	
+	logger.Info("回滚成功", zap.String("namespace", namespace), zap.String("version", version))
+	return nil
+}
+
+// logWriter 实现 io.Writer 用于日志回调
+type logWriter struct {
+	callback func(string)
+}
+
+func (w *logWriter) Write(p []byte) (n int, err error) {
+	if w.callback != nil {
+		w.callback(string(p))
+	}
+	return len(p), nil
 }

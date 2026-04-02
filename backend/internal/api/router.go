@@ -2,21 +2,19 @@ package api
 
 import (
 	"net/http"
-	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"modelmagic-deploy-console/backend/internal/config"
 	"modelmagic-deploy-console/backend/internal/logger"
 	"modelmagic-deploy-console/backend/internal/service"
-	"modelmagic-deploy-console/backend/internal/mmctl"
+
 
 	"go.uber.org/zap"
 )
 
 var (
-	mmctlSvc *mmctl.MmctlService
+	mmctlSvc *service.MmctlService
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true // 允许所有来源，生产环境应限制
@@ -29,7 +27,7 @@ type API struct {
 }
 
 func NewAPI(cfg *config.Config) *API {
-	mmctlSvc = mmctl.NewMmctlService(
+	mmctlSvc = service.NewMmctlService(
 		cfg.Mmctl.BaseDir,
 		cfg.Mmctl.ScriptPath,
 		cfg.Mmctl.WorkDir,
@@ -53,6 +51,8 @@ func (a *API) SetupRoutes(r *gin.Engine) {
 		// 安装/卸载
 		api.POST("/install", a.startInstall)
 		api.POST("/uninstall", a.startUninstall)
+	api.POST("/rollback", a.startRollback)
+	api.POST("/upgrade", a.startUpgrade)
 		api.GET("/access/:name", a.getAccess)
 		
 		// 实时日志 WebSocket
@@ -193,4 +193,33 @@ func (a *API) websocketLogs(c *gin.Context) {
 		// 发送日志
 		// conn.WriteMessage(websocket.TextMessage, []byte(logLine))
 	}
+}
+
+// startRollback 回滚处理函数
+func (a *API) startRollback(c *gin.Context) {
+	var req struct {
+		Namespace string `json:"namespace" binding:"required"`
+		Version   string `json:"version" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 异步执行回滚
+	go func() {
+		err := mmctlSvc.Rollback(req.Namespace, req.Version, func(line string) {
+			logger.Info("Rollback log", zap.String("line", line))
+		})
+		if err != nil {
+			logger.Error("回滚失败", zap.Error(err))
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"message": "回滚已启动", "namespace": req.Namespace, "version": req.Version})
+}
+
+// startUpgrade 升级处理函数（占位符，待实现）
+func (a *API) startUpgrade(c *gin.Context) {
+	c.JSON(http.StatusNotImplemented, gin.H{"error": "升级功能待实现"})
 }

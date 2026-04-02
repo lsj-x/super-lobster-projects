@@ -2,8 +2,8 @@ package api
 
 import (
 	"net/http"
-	"modelmagic-deploy-console/internal/config"
-	"modelmagic-deploy-console/internal/service"
+	"modelmagic-deploy-console/backend/internal/config"
+	"modelmagic-deploy-console/backend/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,7 +25,7 @@ func NewHandler(cfg *config.Config, mm *service.MMService) *Handler {
 func (h *Handler) HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": "ok",
-		"version": h.Config.Version,
+		"version": "v1.0.0",
 	})
 }
 

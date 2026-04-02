@@ -102,7 +102,7 @@ func (s *MMService) GetStatus(ctx context.Context, namespace, modelName string) 
 // ListDeployments 列出部署
 func (s *MMService) ListDeployments(ctx context.Context, namespace string) ([]Deployment, error) {
 	var deployments []Deployment
-	for key, dep := range s.deployments {
+	for _, dep := range s.deployments {
 		if namespace != "" && dep.Namespace != namespace {
 			continue
 		}
