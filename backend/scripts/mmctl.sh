@@ -291,3 +291,27 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
+
+# 90 - 回滚命名空间
+rollback() {
+ local namespace=$1
+ local target_version=$2
+ log_info "开始回滚命名空间 $namespace 到版本 $target_version"
+ if [ ! -d "${WORK_DIR}/history/${target_version}" ]; then
+  log_error "错误：版本 $target_version 不存在"
+  exit 1
+ fi
+ if kubectl rollout undo deployment/modelmagic-service -n "$namespace" --to-revision="$target_version" 2>&1; then
+  log_info "回滚命令执行成功"
+ else
+  log_error "回滚失败"
+  exit 1
+ fi
+ if kubectl rollout status deployment/modelmagic-service -n "$namespace" --timeout=300s; then
+  log_info "回滚完成：$namespace -> $target_version"
+  echo "SUCCESS: Rollback completed"
+ else
+  log_error "回滚超时"
+  exit 1
+ fi
+}
