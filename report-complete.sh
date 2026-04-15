@@ -64,9 +64,10 @@ generate_report() {
 
  report+="\n📋 **构建摘要**:\n"
  if [ -n "$step" ]; then
-  local backend_time=$(grep -o '"build_backend":[^,}]*' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'"' -f4 || echo "未知")
-  local frontend_time=$(grep -o '"build_frontend":[^,}]*' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'"' -f4 || echo "未知")
-  local test_time=$(grep -o '"run_tests":[^,}]*' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'"' -f4 || echo "未知")
+  # 从日志中提取时间戳
+  local backend_time=$(grep "✅ 后端编译成功" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/\[\([^]]*\)\].*/\1/' || echo "未知")
+  local frontend_time=$(grep "✅ 前端编译成功" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/\[\([^]]*\)\].*/\1/' || echo "未知")
+  local test_time=$(grep "✅ 测试全部通过" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/\[\([^]]*\)\].*/\1/' || echo "未知")
   report+=" - 后端编译：${backend_time:-未知}\n"
   report+=" - 前端编译：${frontend_time:-未知}\n"
   report+=" - 集成测试：${test_time:-未知}\n"
