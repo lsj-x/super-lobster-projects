@@ -133,7 +133,7 @@ generate_report() {
     local total=$(grep -o '"total":[0-9]*' "$STATS_FILE" | cut -d: -f2)
     local success_count=$(grep -o '"success":[0-9]*' "$STATS_FILE" | cut -d: -f2)
     local success_rate=0
-    if [ $total -gt 0 ]; then
+    if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
       success_rate=$((success_count * 100 / total))
     fi
     report+="- 总构建次数：$total\n"
