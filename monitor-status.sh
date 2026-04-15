@@ -18,9 +18,9 @@ LOCK_FILE="${PROJECT_DIR}/.auto-build.lock"
 MONITOR_LOG="${PROJECT_DIR}/monitor.log"
 
 # 监控阈值（秒）
-MAX_BUILD_TIME=3600      # 最大构建时间 1 小时
-MAX_STALE_TIME=7200      # 最大陈旧时间 2 小时
-CHECK_INTERVAL=300       # 检查间隔 5 分钟
+MAX_BUILD_TIME=3600    # 最大构建时间 1 小时
+MAX_STALE_TIME=7200    # 最大陈旧时间 2 小时
+CHECK_INTERVAL=300     # 检查间隔 5 分钟
 
 # 通知配置
 NOTIFY_CHANNEL="feishu"
@@ -35,9 +35,9 @@ log() {
   echo -e "$msg" >> "$MONITOR_LOG"
 }
 
-info()    { log "INFO" "$1"; }
-warn()    { log "WARN" "$1"; }
-error()   { log "ERROR" "$1"; }
+info() { log "INFO" "$1"; }
+warn() { log "WARN" "$1"; }
+error() { log "ERROR" "$1"; }
 
 # 获取当前状态
 get_build_state() {
@@ -52,11 +52,10 @@ get_build_state() {
 parse_state() {
   local state="$1"
   local field="$2"
-  
   case $field in
-    step)   echo "$state" | cut -d'|' -f1 ;;
+    step) echo "$state" | cut -d'|' -f1 ;;
     status) echo "$state" | cut -d'|' -f2 ;;
-    time)   echo "$state" | cut -d'|' -f3 ;;
+    time) echo "$state" | cut -d'|' -f3 ;;
   esac
 }
 
@@ -73,7 +72,6 @@ format_time_diff() {
   local hours=$((diff / 3600))
   local minutes=$(((diff % 3600) / 60))
   local seconds=$((diff % 60))
-  
   if [ $hours -gt 0 ]; then
     echo "${hours}小时${minutes}分钟"
   elif [ $minutes -gt 0 ]; then
@@ -88,7 +86,6 @@ send_notification() {
   local title="$1"
   local content="$2"
   local level="${3:-info}"  # info, success, warning, error
-  
   info "📢 发送通知：$title"
   
   # 记录到通知日志
@@ -99,12 +96,7 @@ send_notification() {
   if [ -n "$OPENCLAW_NOTIFY_URL" ]; then
     curl -s -X POST "$OPENCLAW_NOTIFY_URL" \
       -H "Content-Type: application/json" \
-      -d "{
-        \"title\": \"$title\",
-        \"content\": \"$content\",
-        \"level\": \"$level\",
-        \"user\": \"$NOTIFY_USER\"
-      }"
+      -d "{ \"title\": \"$title\", \"content\": \"$content\", \"level\": \"$level\", \"user\": \"$NOTIFY_USER\" }"
   fi
 }
 
@@ -127,11 +119,9 @@ check_build_stuck() {
   if [ $diff -gt $MAX_BUILD_TIME ]; then
     local time_str=$(format_time_diff $diff)
     error "❌ 构建任务已运行 ${time_str}，可能已卡死"
-    
     send_notification "⚠️ 构建任务卡死警告" \
       "构建任务已运行 ${time_str} 未完成，可能已卡死。\n步骤：$(parse_state "$state" "step")\n建议：检查日志或手动干预" \
       "warning"
-    
     return 1
   fi
   
@@ -152,11 +142,9 @@ check_state_stale() {
   if [ $diff -gt $MAX_STALE_TIME ]; then
     local time_str=$(format_time_diff $diff)
     warn "⚠️ 状态文件已过陈旧 ${time_str}，可能需要清理"
-    
     send_notification "📝 状态文件陈旧警告" \
       "状态文件已 ${time_str} 未更新，可能是上次构建异常退出。\n建议：检查日志或清理状态文件" \
       "warning"
-    
     return 1
   fi
   
@@ -178,7 +166,6 @@ check_lock_stale() {
   if ! kill -0 "$lock_pid" 2>/dev/null; then
     warn "发现残留锁文件（PID: $lock_pid 不存在），清理中..."
     rm -f "$LOCK_FILE"
-    
     send_notification "🔓 清理残留锁文件" \
       "发现构建锁文件残留（原 PID: $lock_pid），已自动清理。" \
       "info"
@@ -193,11 +180,9 @@ check_disk_space() {
   
   if [ "$usage" -gt 90 ]; then
     error "❌ 磁盘空间不足 ${usage}%"
-    
     send_notification "💾 磁盘空间警告" \
       "项目磁盘使用率已达 ${usage}%，可能导致构建失败。\n建议：清理旧构建产物或扩容" \
       "error"
-    
     return 1
   elif [ "$usage" -gt 80 ]; then
     warn "⚠️ 磁盘使用率 ${usage}%"
@@ -214,19 +199,23 @@ check_last_build() {
     return 0
   fi
   
-  # 检查最近一次构建是否成功
-  local last_result=$(grep "构建完成\|构建失败\|中断" "$LOG_FILE" | tail -1)
+  # 检查最近一次构建结果（查找"构建流程结束"行）
+  local last_build=$(grep "构建流程结束" "$LOG_FILE" | tail -1)
   
-  if echo "$last_result" | grep -q "失败\|中断"; then
-    local time_ago=$(echo "$last_result" | grep -oE '\[.*\]' | head -1)
-    warn "最近一次构建失败：$last_result"
+  if echo "$last_build" | grep -q "failed"; then
+    warn "最近一次构建失败：$last_build"
+    
+    # 提取失败原因
+    local fail_reason=$(grep -E "ERROR.*命令执行失败|ERROR.*前端编译失败|ERROR.*后端编译失败" "$LOG_FILE" | tail -1)
+    if [ -z "$fail_reason" ]; then
+      fail_reason="未知错误，请查看日志"
+    fi
     
     send_notification "❌ 构建失败通知" \
-      "最近一次构建失败：$last_result\n请检查日志排查原因" \
+      "最近一次构建失败：$last_build\n失败原因：$fail_reason\n请检查日志排查原因" \
       "error"
-    
     return 1
-  elif echo "$last_result" | grep -q "完成"; then
+  elif echo "$last_build" | grep -q "success\|完成"; then
     info "✓ 最近一次构建成功"
   fi
   
@@ -257,7 +246,6 @@ recover_stuck_build() {
 
 main() {
   info "🔍 开始状态监控检查..."
-  
   local issues=0
   
   # 执行所有检查
