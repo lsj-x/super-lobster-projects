@@ -10,6 +10,9 @@
 
 set -e
 
+# 记录开始时间
+BUILD_START_TIME=$(date +%s)
+
 # ============ 配置区 ============
 PROJECT_DIR="/root/.openclaw/workspace/repos/modelmagic-deploy-console"
 LOG_FILE="${PROJECT_DIR}/auto-build.log"
@@ -431,12 +434,16 @@ main() {
   save_state "completed" "success"
   
   release_lock
-  
-  # 调用完成上报
-  if [ -x "$REPORT_SCRIPT" ]; then
-    info "📊 生成构建报告..."
-    bash "$REPORT_SCRIPT" "success" "completed" 2>&1 | tee -a "$LOG_FILE"
-  fi
+
+    # 计算耗时
+    local end_time=$(date +%s)
+    local duration=$((end_time - BUILD_START_TIME))
+
+    # 调用完成上报
+    if [ -x "$REPORT_SCRIPT" ]; then
+        info "📊 生成构建报告..."
+        bash "$REPORT_SCRIPT" "success" "$duration" "completed" 2>&1 | tee -a "$LOG_FILE"
+    fi
   
   return 0
 }
