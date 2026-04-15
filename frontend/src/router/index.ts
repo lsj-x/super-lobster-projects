@@ -26,6 +26,12 @@ const routes = [
         meta: { title: '命名空间', icon: 'Folder' }
       },
       {
+        path: 'secrets',
+        name: 'Secrets',
+        component: () => import('@/views/secrets/index.vue'),
+        meta: { title: '密钥管理', icon: 'Key' }
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),

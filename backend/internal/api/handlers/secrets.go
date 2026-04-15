@@ -1,181 +1,215 @@
-package api
+package handlers
 
 import (
 	"net/http"
-
-	"github.com/gin-gonic/gin"
 	"modelmagic-deploy-console/backend/internal/service"
+	"github.com/gin-gonic/gin"
 )
 
-// SecretHandlers Secret API 处理器
-type SecretHandlers struct {
-	secretMgr *service.SecretManager
+// SecretHandler 处理 Secret 相关的 API 请求
+type SecretHandler struct {
+	SecretManager *service.SecretManager
 }
 
-// NewSecretHandlers 创建 Secret 处理器
-func NewSecretHandlers(secretMgr *service.SecretManager) *SecretHandlers {
-	return &SecretHandlers{
-		secretMgr: secretMgr,
+// NewSecretHandler 创建新的 SecretHandler 实例
+func NewSecretHandler(sm *service.SecretManager) *SecretHandler {
+	return &SecretHandler{
+		SecretManager: sm,
 	}
 }
 
-// CreateSecretRequest 创建秘密请求
+// CreateSecretRequest 创建 Secret 的请求体
 type CreateSecretRequest struct {
-	Name        string            `json:"name" binding:"required"`
-	Data        map[string]string `json:"data" binding:"required"`
-	Description string            `json:"description"`
+	Name      string            `json:"name" binding:"required"`
+	Namespace string            `json:"namespace" binding:"required"`
+	Data      map[string]string `json:"data" binding:"required,min=1"`
 }
 
-// UpdateSecretRequest 更新秘密请求
+// UpdateSecretRequest 更新 Secret 的请求体
 type UpdateSecretRequest struct {
-	Data        map[string]string `json:"data" binding:"required"`
-	Description string            `json:"description"`
+	Name      string            `json:"name" binding:"required"`
+	Namespace string            `json:"namespace" binding:"required"`
+	Data      map[string]string `json:"data" binding:"required,min=1"`
 }
 
-// CreateSecret 创建秘密
-// @Summary 创建秘密
-// @Description 创建一个加密的秘密
-// @Tags secrets
-// @Accept json
-// @Produce json
-// @Param secret body CreateSecretRequest true "秘密数据"
-// @Success 201 {object} service.SecretData
-// @Failure 400 {object} map[string]string
-// @Failure 500 {object} map[string]string
-// @Router /api/v1/secrets [post]
-func (h *SecretHandlers) CreateSecret(c *gin.Context) {
+// CreateSecret 创建新的 Secret
+// POST /api/v1/secrets
+func (h *SecretHandler) CreateSecret(c *gin.Context) {
 	var req CreateSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
 		return
 	}
 
-	// 验证名称
+	// 验证命名空间格式
+	if err := service.ValidateNamespace(req.Namespace); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid namespace: " + err.Error(),
+		})
+		return
+	}
+
+	// 验证 Secret 名称
 	if req.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Secret name is required",
+		})
 		return
 	}
 
-	if len(req.Data) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "数据不能为空"})
-		return
-	}
-
-	secret, err := h.secretMgr.CreateSecret(req.Name, req.Data, req.Description)
+	// 创建 Secret
+	err := h.SecretManager.CreateSecret(c.Request.Context(), req.Namespace, req.Name, req.Data)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to create secret: " + err.Error(),
+		})
 		return
 	}
 
-	c.JSON(http.StatusCreated, secret)
+	c.JSON(http.StatusCreated, gin.H{
+		"message":   "Secret created successfully",
+		"name":      req.Name,
+		"namespace": req.Namespace,
+	})
 }
 
-// GetSecret 获取秘密
-// @Summary 获取秘密
-// @Description 获取指定名称的秘密
-// @Tags secrets
-// @Produce json
-// @Param name path string true "秘密名称"
-// @Success 200 {object} service.SecretData
-// @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
-// @Router /api/v1/secrets/{name} [get]
-func (h *SecretHandlers) GetSecret(c *gin.Context) {
+// GetSecret 获取单个 Secret
+// GET /api/v1/secrets/:namespace/:name
+func (h *SecretHandler) GetSecret(c *gin.Context) {
+	namespace := c.Param("namespace")
 	name := c.Param("name")
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
+
+	if namespace == "" || name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Namespace and name are required",
+		})
 		return
 	}
 
-	secret, err := h.secretMgr.GetSecret(name)
+	secret, err := h.SecretManager.GetSecret(c.Request.Context(), namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		if err == service.ErrSecretNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Secret not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to get secret: " + err.Error(),
+		})
 		return
 	}
 
 	c.JSON(http.StatusOK, secret)
 }
 
-// ListSecrets 列出所有秘密
-// @Summary 列出所有秘密
-// @Description 获取所有秘密的列表
-// @Tags secrets
-// @Produce json
-// @Success 200 {array} string
-// @Failure 500 {object} map[string]string
-// @Router /api/v1/secrets [get]
-func (h *SecretHandlers) ListSecrets(c *gin.Context) {
-	names, err := h.secretMgr.ListSecrets()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"secrets": names})
-}
-
-// UpdateSecret 更新秘密
-// @Summary 更新秘密
-// @Description 更新指定名称的秘密
-// @Tags secrets
-// @Accept json
-// @Produce json
-// @Param name path string true "秘密名称"
-// @Param secret body UpdateSecretRequest true "更新数据"
-// @Success 200 {object} service.SecretData
-// @Failure 400 {object} map[string]string
-// @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
-// @Router /api/v1/secrets/{name} [put]
-func (h *SecretHandlers) UpdateSecret(c *gin.Context) {
-	name := c.Param("name")
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
-		return
-	}
-
+// UpdateSecret 更新现有 Secret
+// PUT /api/v1/secrets/:namespace/:name
+func (h *SecretHandler) UpdateSecret(c *gin.Context) {
 	var req UpdateSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
 		return
 	}
 
-	if len(req.Data) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "数据不能为空"})
+	// 使用 URL 路径参数优先
+	namespace := c.Param("namespace")
+	name := c.Param("name")
+	if namespace != "" && name != "" {
+		req.Namespace = namespace
+		req.Name = name
+	}
+
+	// 验证
+	if req.Namespace == "" || req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Namespace and name are required",
+		})
 		return
 	}
 
-	secret, err := h.secretMgr.UpdateSecret(name, req.Data, req.Description)
+	// 更新 Secret
+	err := h.SecretManager.UpdateSecret(c.Request.Context(), req.Namespace, req.Name, req.Data)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		if err == service.ErrSecretNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Secret not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to update secret: " + err.Error(),
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, secret)
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Secret updated successfully",
+		"name":      req.Name,
+		"namespace": req.Namespace,
+	})
 }
 
-// DeleteSecret 删除秘密
-// @Summary 删除秘密
-// @Description 删除指定名称的秘密
-// @Tags secrets
-// @Produce json
-// @Param name path string true "秘密名称"
-// @Success 200 {object} map[string]string
-// @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
-// @Router /api/v1/secrets/{name} [delete]
-func (h *SecretHandlers) DeleteSecret(c *gin.Context) {
+// DeleteSecret 删除 Secret
+// DELETE /api/v1/secrets/:namespace/:name
+func (h *SecretHandler) DeleteSecret(c *gin.Context) {
+	namespace := c.Param("namespace")
 	name := c.Param("name")
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
+
+	if namespace == "" || name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Namespace and name are required",
+		})
 		return
 	}
 
-	err := h.secretMgr.DeleteSecret(name)
+	err := h.SecretManager.DeleteSecret(c.Request.Context(), namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		if err == service.ErrSecretNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Secret not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to delete secret: " + err.Error(),
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "秘密已删除", "name": name})
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Secret deleted successfully",
+		"name":      name,
+		"namespace": namespace,
+	})
+}
+
+// ListSecrets 列出命名空间中的所有 Secret
+// GET /api/v1/secrets?namespace=xxx
+func (h *SecretHandler) ListSecrets(c *gin.Context) {
+	namespace := c.Query("namespace")
+	if namespace == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Namespace query parameter is required",
+		})
+		return
+	}
+
+	secrets, err := h.SecretManager.ListSecrets(c.Request.Context(), namespace)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to list secrets: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"namespace": namespace,
+		"secrets":   secrets,
+		"count":     len(secrets),
+	})
 }

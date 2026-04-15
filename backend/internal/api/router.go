@@ -2,21 +2,19 @@ package api
 
 import (
 	"net/http"
-
-	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"modelmagic-deploy-console/backend/internal/config"
 	"modelmagic-deploy-console/backend/internal/logger"
 	"modelmagic-deploy-console/backend/internal/service"
 
-
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
 var (
-	mmctlSvc   *service.MmctlService
-	secretSvc  *service.SecretManager
-	upgrader   = websocket.Upgrader{
+	mmctlSvc    *service.MmctlService
+	secretSvc   *service.SecretManager
+	upgrader    = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true // 允许所有来源，生产环境应限制
 		},
@@ -33,7 +31,14 @@ func NewAPI(cfg *config.Config) *API {
 		cfg.Mmctl.ScriptPath,
 		cfg.Mmctl.WorkDir,
 	)
-	secretSvc, _ = service.NewSecretManager() // 忽略错误，实际使用中应该处理
+	
+	// 初始化 SecretManager（可能失败）
+	var err error
+	secretSvc, err = service.NewSecretManager(nil)
+	if err != nil {
+		logger.Warn("Failed to initialize SecretManager", zap.Error(err))
+	}
+	
 	return &API{cfg: cfg}
 }
 
@@ -50,18 +55,19 @@ func (a *API) SetupRoutes(r *gin.Engine) {
 		api.PUT("/namespaces/:name", a.updateNamespace)
 		api.DELETE("/namespaces/:name", a.deleteNamespace)
 		
-		// 安装/卸载
+		// 安装/卸载/升级/回滚
 		api.POST("/install", a.startInstall)
 		api.POST("/uninstall", a.startUninstall)
-	api.POST("/rollback", a.startRollback)
-	api.POST("/upgrade", a.startUpgrade)
+		api.POST("/rollback", a.startRollback)
+		api.POST("/upgrade", a.startUpgrade)
 		api.GET("/access/:name", a.getAccess)
+		
 		// Secret 管理
-		api.GET("/secrets", a.listSecrets)
-		api.GET("/secrets/:name", a.getSecret)
-		api.POST("/secrets", a.createSecret)
-		api.PUT("/secrets/:name", a.updateSecret)
-		api.DELETE("/secrets/:name", a.deleteSecret)
+		api.GET("/secrets", a.listSecretsHandler)
+		api.GET("/secrets/:namespace/:name", a.getSecretHandler)
+		api.POST("/secrets", a.createSecretHandler)
+		api.PUT("/secrets/:namespace/:name", a.updateSecretHandler)
+		api.DELETE("/secrets/:namespace/:name", a.deleteSecretHandler)
 		
 		// 实时日志 WebSocket
 		api.GET("/logs/ws", a.websocketLogs)
@@ -71,6 +77,8 @@ func (a *API) SetupRoutes(r *gin.Engine) {
 func (a *API) healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
+
+// ============ 命名空间管理 ============
 
 func (a *API) listNamespaces(c *gin.Context) {
 	namespaces, err := mmctlSvc.ListNamespaces()
@@ -100,13 +108,15 @@ func (a *API) createNamespace(c *gin.Context) {
 		return
 	}
 	
-	// 生成默认配置
 	if err := mmctlSvc.NewNamespace(req.Namespace); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	
-	c.JSON(http.StatusCreated, gin.H{"message": "命名空间配置已创建", "namespace": req.Namespace})
+	c.JSON(http.StatusCreated, gin.H{
+		"message":   "命名空间配置已创建",
+		"namespace": req.Namespace,
+	})
 }
 
 func (a *API) updateNamespace(c *gin.Context) {
@@ -122,14 +132,21 @@ func (a *API) updateNamespace(c *gin.Context) {
 		return
 	}
 	
-	c.JSON(http.StatusOK, gin.H{"message": "配置已更新", "namespace": name})
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "配置已更新",
+		"namespace": name,
+	})
 }
 
 func (a *API) deleteNamespace(c *gin.Context) {
 	name := c.Param("name")
-	// 这里应该先检查是否已安装，如果已安装则提示用户
-	c.JSON(http.StatusOK, gin.H{"message": "命名空间删除请求已接收", "namespace": name})
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "命名空间删除请求已接收",
+		"namespace": name,
+	})
 }
+
+// ============ 安装/卸载/升级/回滚 ============
 
 func (a *API) startInstall(c *gin.Context) {
 	var req struct {
@@ -144,7 +161,6 @@ func (a *API) startInstall(c *gin.Context) {
 	// 异步执行安装
 	go func() {
 		err := mmctlSvc.Install(req.Namespace, req.Step, func(line string) {
-			// 这里可以将日志推送到 WebSocket 客户端
 			logger.Info("Install log", zap.String("line", line))
 		})
 		if err != nil {
@@ -152,7 +168,11 @@ func (a *API) startInstall(c *gin.Context) {
 		}
 	}()
 	
-	c.JSON(http.StatusOK, gin.H{"message": "安装任务已启动", "namespace": req.Namespace, "step": req.Step})
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "安装任务已启动",
+		"namespace": req.Namespace,
+		"step":      req.Step,
+	})
 }
 
 func (a *API) startUninstall(c *gin.Context) {
@@ -165,12 +185,69 @@ func (a *API) startUninstall(c *gin.Context) {
 		return
 	}
 	
-	if err := mmctlSvc.Uninstall(req.Namespace, req.Step); err != nil {
+	if err := mmctlSvc.Uninstall(req.Namespace, req.Step, nil); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	
-	c.JSON(http.StatusOK, gin.H{"message": "卸载完成", "namespace": req.Namespace})
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "卸载完成",
+		"namespace": req.Namespace,
+	})
+}
+
+func (a *API) startRollback(c *gin.Context) {
+	var req struct {
+		Namespace string `json:"namespace" binding:"required"`
+		Version   string `json:"version" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	// 异步执行回滚
+	go func() {
+		err := mmctlSvc.Rollback(req.Namespace, req.Version, func(line string) {
+			logger.Info("Rollback log", zap.String("line", line))
+		})
+		if err != nil {
+			logger.Error("回滚失败", zap.Error(err))
+		}
+	}()
+	
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "回滚已启动",
+		"namespace": req.Namespace,
+		"version":   req.Version,
+	})
+}
+
+func (a *API) startUpgrade(c *gin.Context) {
+	var req struct {
+		Namespace string `json:"namespace" binding:"required"`
+		Version   string `json:"version" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	// 异步执行升级
+	go func() {
+		err := mmctlSvc.Upgrade(req.Namespace, req.Version, func(line string) {
+			logger.Info("Upgrade log", zap.String("line", line))
+		})
+		if err != nil {
+			logger.Error("升级失败", zap.Error(err))
+		}
+	}()
+	
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "升级已启动",
+		"namespace": req.Namespace,
+		"version":   req.Version,
+	})
 }
 
 func (a *API) getAccess(c *gin.Context) {
@@ -183,6 +260,151 @@ func (a *API) getAccess(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"url": url})
 }
 
+// ============ Secret 管理 ============
+
+func (a *API) listSecretsHandler(c *gin.Context) {
+	namespace := c.Query("namespace")
+	if namespace == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace query parameter is required"})
+		return
+	}
+	
+	if secretSvc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
+		return
+	}
+	
+	secrets, err := secretSvc.ListSecrets(c.Request.Context(), namespace)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"namespace": namespace,
+		"secrets":   secrets,
+		"count":     len(secrets),
+	})
+}
+
+func (a *API) getSecretHandler(c *gin.Context) {
+	namespace := c.Param("namespace")
+	name := c.Param("name")
+	
+	if secretSvc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
+		return
+	}
+	
+	secret, err := secretSvc.GetSecret(c.Request.Context(), namespace, name)
+	if err != nil {
+		if err == service.ErrSecretNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Secret not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(http.StatusOK, secret)
+}
+
+func (a *API) createSecretHandler(c *gin.Context) {
+	var req struct {
+		Name      string            `json:"name" binding:"required"`
+		Namespace string            `json:"namespace" binding:"required"`
+		Data      map[string]string `json:"data" binding:"required,min=1"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	if secretSvc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
+		return
+	}
+	
+	if err := service.ValidateNamespace(req.Namespace); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid namespace: " + err.Error()})
+		return
+	}
+	
+	err := secretSvc.CreateSecret(c.Request.Context(), req.Namespace, req.Name, req.Data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(http.StatusCreated, gin.H{
+		"message":   "Secret created successfully",
+		"name":      req.Name,
+		"namespace": req.Namespace,
+	})
+}
+
+func (a *API) updateSecretHandler(c *gin.Context) {
+	namespace := c.Param("namespace")
+	name := c.Param("name")
+	
+	var req struct {
+		Data map[string]string `json:"data" binding:"required,min=1"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	if secretSvc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
+		return
+	}
+	
+	err := secretSvc.UpdateSecret(c.Request.Context(), namespace, name, req.Data)
+	if err != nil {
+		if err == service.ErrSecretNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Secret not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Secret updated successfully",
+		"name":      name,
+		"namespace": namespace,
+	})
+}
+
+func (a *API) deleteSecretHandler(c *gin.Context) {
+	namespace := c.Param("namespace")
+	name := c.Param("name")
+	
+	if secretSvc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
+		return
+	}
+	
+	err := secretSvc.DeleteSecret(c.Request.Context(), namespace, name)
+	if err != nil {
+		if err == service.ErrSecretNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Secret not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Secret deleted successfully",
+		"name":      name,
+		"namespace": namespace,
+	})
+}
+
+// ============ WebSocket 日志 ============
+
 func (a *API) websocketLogs(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -191,134 +413,12 @@ func (a *API) websocketLogs(c *gin.Context) {
 	}
 	defer conn.Close()
 	
-	// 这里可以将实时日志推送到客户端
-	// 实际实现需要维护一个日志通道
+	// 保持连接
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		// 发送日志
-		// conn.WriteMessage(websocket.TextMessage, []byte(logLine))
+		// 实际实现需要订阅日志通道并推送
 	}
-}
-
-// startRollback 回滚处理函数
-func (a *API) startRollback(c *gin.Context) {
-	var req struct {
-		Namespace string `json:"namespace" binding:"required"`
-		Version   string `json:"version" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// 异步执行回滚
-	go func() {
-		err := mmctlSvc.Rollback(req.Namespace, req.Version, func(line string) {
-			logger.Info("Rollback log", zap.String("line", line))
-		})
-		if err != nil {
-			logger.Error("回滚失败", zap.Error(err))
-		}
-	}()
-
-	c.JSON(http.StatusOK, gin.H{"message": "回滚已启动", "namespace": req.Namespace, "version": req.Version})
-}
-
-// startUpgrade 升级处理函数
-func (a *API) startUpgrade(c *gin.Context) {
-	var req struct {
-		Namespace string `json:"namespace" binding:"required"`
-		Version   string `json:"version" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// 异步执行升级
-	go func() {
-		err := mmctlSvc.Upgrade(req.Namespace, req.Version, func(line string) {
-			logger.Info("Upgrade log", zap.String("line", line))
-		})
-		if err != nil {
-			logger.Error("升级失败", zap.Error(err))
-		}
-	}()
-
-	c.JSON(http.StatusOK, gin.H{"message": "升级已启动", "namespace": req.Namespace, "version": req.Version})
-}
-
-// listSecrets 列出所有 Secrets
-func (a *API) listSecrets(c *gin.Context) {
-	secrets, err := secretSvc.ListSecrets()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"secrets": secrets})
-}
-
-// getSecret 获取 Secret 详情
-func (a *API) getSecret(c *gin.Context) {
-	name := c.Param("name")
-	secret, err := secretSvc.GetSecret(name)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"secret": secret})
-}
-
-// createSecret 创建 Secret
-func (a *API) createSecret(c *gin.Context) {
-	var req struct {
-		Name        string            `json:"name" binding:"required"`
-		Data        map[string]string `json:"data" binding:"required"`
-		Description string            `json:"description"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	secret, err := secretSvc.CreateSecret(req.Name, req.Data, req.Description)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, gin.H{"message": "Secret 创建成功", "secret": secret})
-}
-
-// updateSecret 更新 Secret
-func (a *API) updateSecret(c *gin.Context) {
-	name := c.Param("name")
-	var req struct {
-		Data        map[string]string `json:"data" binding:"required"`
-		Description string            `json:"description"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	secret, err := secretSvc.UpdateSecret(name, req.Data, req.Description)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Secret 更新成功", "secret": secret})
-}
-
-// deleteSecret 删除 Secret
-func (a *API) deleteSecret(c *gin.Context) {
-	name := c.Param("name")
-	err := secretSvc.DeleteSecret(name)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Secret 删除成功", "name": name})
 }

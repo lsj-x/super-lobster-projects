@@ -1,269 +1,247 @@
 package service
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
-// SecretManager 秘密管理器
+var (
+	ErrSecretKeyMissing  = errors.New("SECRET_ENCRYPTION_KEY environment variable is not set")
+	ErrSecretNotFound    = errors.New("secret not found")
+	ErrInvalidSecretData = errors.New("invalid secret data")
+)
+
+// SecretManager 管理 Kubernetes Secret 的加密和解密
 type SecretManager struct {
-	clientset      *kubernetes.Clientset
-	encryptionKey  []byte
-	namespace      string
+	clientset     *kubernetes.Clientset
+	encryptionKey []byte
 }
 
-// SecretData 秘密数据结构
-type SecretData struct {
-	Name        string            `json:"name"`
-	Data        map[string]string `json:"data"`
-	Description string            `json:"description,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-}
-
-// NewSecretManager 创建新的秘密管理器
-func NewSecretManager() (*SecretManager, error) {
-	// 从环境变量读取加密密钥
-	encryptionKeyStr := os.Getenv("SECRET_ENCRYPTION_KEY")
-	if encryptionKeyStr == "" {
-		return nil, fmt.Errorf("SECRET_ENCRYPTION_KEY 环境变量未设置")
-	}
-
-	// 解码加密密钥 (base64)
-	encryptionKey, err := base64.StdEncoding.DecodeString(encryptionKeyStr)
-	if err != nil {
-		return nil, fmt.Errorf("解密密钥解码失败: %w", err)
-	}
-
-	// 验证密钥长度 (AES-256 需要 32 字节)
-	if len(encryptionKey) != 32 {
-		return nil, fmt.Errorf("加密密钥长度必须是 32 字节 (AES-256)")
-	}
-
-	// 获取 Kubernetes 客户端配置
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		// 如果不在集群中，尝试使用本地 kubeconfig
-		kubeconfig := os.Getenv("KUBECONFIG")
-		if kubeconfig == "" {
-			kubeconfig = os.Getenv("HOME") + "/.kube/config"
+// NewSecretManager 创建新的 SecretManager 实例
+func NewSecretManager(clientset *kubernetes.Clientset) (*SecretManager, error) {
+	key := os.Getenv("SECRET_ENCRYPTION_KEY")
+	if key == "" {
+		// 开发模式下允许无加密密钥（不推荐生产环境）
+		if os.Getenv("ENV") == "development" {
+			key = "dev-secret-key-32-bytes-long!!"
+		} else {
+			return nil, ErrSecretKeyMissing
 		}
-		config, err = rest.InClusterConfig()
-		if err != nil {
-			// 创建模拟管理器用于测试
-			return &SecretManager{
-				clientset:     nil,
-				encryptionKey: encryptionKey,
-				namespace:     "default",
-			}, nil
-		}
-	}
-
-	// 创建 Kubernetes 客户端
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("创建 Kubernetes 客户端失败: %w", err)
-	}
-
-	// 获取当前命名空间
-	namespace := "default"
-	if nsBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-		namespace = string(nsBytes)
 	}
 
 	return &SecretManager{
 		clientset:     clientset,
-		encryptionKey: encryptionKey,
-		namespace:     namespace,
+		encryptionKey: []byte(key),
 	}, nil
 }
 
-// Encrypt 加密数据 (AES-256-GCM)
-func (m *SecretManager) Encrypt(plaintext string) (string, error) {
+// Encrypt 使用 AES-256-GCM 加密数据
+func (m *SecretManager) Encrypt(data string) (string, error) {
+	// 准备数据
+	plaintext := []byte(data)
+
+	// 创建 cipher block
 	block, err := aes.NewCipher(m.encryptionKey)
 	if err != nil {
-		return "", fmt.Errorf("创建 AES 密码块失败: %w", err)
+		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// GCM 模式不需要 IV 填充
+	// 创建 GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("创建 GCM 模式失败: %w", err)
+		return "", fmt.Errorf("failed to create GCM: %w", err)
 	}
 
 	// 生成随机 nonce
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", fmt.Errorf("生成 nonce 失败: %w", err)
+		return "", fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
 	// 加密数据
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
 
-	// 返回 base64 编码的密文
+	// 编码为 base64
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// Decrypt 解密数据 (AES-256-GCM)
-func (m *SecretManager) Decrypt(ciphertext string) (string, error) {
+// Decrypt 解密数据
+func (m *SecretManager) Decrypt(encrypted string) (string, error) {
 	// 解码 base64
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
+	ciphertext, err := base64.StdEncoding.DecodeString(encrypted)
 	if err != nil {
-		return "", fmt.Errorf("base64 解码失败: %w", err)
+		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}
 
+	// 创建 cipher block
 	block, err := aes.NewCipher(m.encryptionKey)
 	if err != nil {
-		return "", fmt.Errorf("创建 AES 密码块失败: %w", err)
+		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
+	// 创建 GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("创建 GCM 模式失败: %w", err)
+		return "", fmt.Errorf("failed to create GCM: %w", err)
 	}
 
+	// 检查数据长度
 	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return "", fmt.Errorf("密文太短")
+	if len(ciphertext) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
 	}
 
-	// 提取 nonce 和密文
-	nonce, ciphertextBytes := data[:nonceSize], data[nonceSize:]
+	// 分离 nonce 和密文
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 
-	// 解密
-	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, nil)
+	// 解密数据
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return "", fmt.Errorf("解密失败: %w", err)
+		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
 
 	return string(plaintext), nil
 }
 
-// CreateSecret 创建秘密
-func (m *SecretManager) CreateSecret(name string, data map[string]string, description string) (*SecretData, error) {
+// SecretData 表示一个 Secret 的数据
+type SecretData struct {
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Data      map[string]string `json:"data"`
+	CreatedAt string            `json:"created_at"`
+	UpdatedAt string            `json:"updated_at"`
+}
+
+// CreateSecret 创建新的 Secret
+func (m *SecretManager) CreateSecret(ctx context.Context, namespace, name string, data map[string]string) error {
 	// 加密所有数据值
-	encryptedData := make(map[string]string)
+	encryptedData := make(map[string][]byte)
 	for key, value := range data {
-		encryptedValue, err := m.Encrypt(value)
+		encrypted, err := m.Encrypt(value)
 		if err != nil {
-			return nil, fmt.Errorf("加密值失败 [%s]: %w", key, err)
+			return fmt.Errorf("failed to encrypt value for key '%s': %w", key, err)
 		}
-		encryptedData[key] = encryptedValue
+		encryptedData[key] = []byte(encrypted)
 	}
 
-	// 转换为 Kubernetes Secret
-	k8sData := make(map[string][]byte)
-	for key, value := range encryptedData {
-		k8sData[key] = []byte(value)
-	}
-
+	// 创建 Kubernetes Secret 对象
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: m.namespace,
+			Namespace: namespace,
 			Labels: map[string]string{
-				"app":     "modelmagic",
-				"managed": "true",
-			},
-			Annotations: map[string]string{
-				"description": description,
+				"managed-by": "modelmagic-deploy-console",
 			},
 		},
+		Data: encryptedData,
 		Type: corev1.SecretTypeOpaque,
-		Data: k8sData,
 	}
 
-	if m.clientset != nil {
-		_, err := m.clientset.CoreV1().Secrets(m.namespace).Create(nil, secret, metav1.CreateOptions{})
-		if err != nil {
-			if errors.IsAlreadyExists(err) {
-				return nil, fmt.Errorf("秘密已存在：%s", name)
-			}
-			return nil, fmt.Errorf("创建 Kubernetes Secret 失败: %w", err)
+	// 调用 K8s API 创建 Secret
+	_, err := m.clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+	if err != nil {
+		if k8sErrors.IsAlreadyExists(err) {
+			return fmt.Errorf("secret '%s' already exists in namespace '%s'", name, namespace)
 		}
+		return fmt.Errorf("failed to create secret: %w", err)
 	}
 
-	now := time.Now()
-	return &SecretData{
-		Name:        name,
-		Data:        data, // 返回原始数据（不返回加密数据）
-		Description: description,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}, nil
+	return nil
 }
 
-// GetSecret 获取秘密
-func (m *SecretManager) GetSecret(name string) (*SecretData, error) {
-	var secret *corev1.Secret
-	var err error
-
-	if m.clientset != nil {
-		secret, err = m.clientset.CoreV1().Secrets(m.namespace).Get(nil, name, metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return nil, fmt.Errorf("秘密不存在：%s", name)
-			}
-			return nil, fmt.Errorf("获取 Kubernetes Secret 失败: %w", err)
+// GetSecret 获取 Secret（解密后的值）
+func (m *SecretManager) GetSecret(ctx context.Context, namespace, name string) (*SecretData, error) {
+	// 从 K8s 获取 Secret
+	k8sSecret, err := m.clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if k8sErrors.IsNotFound(err) {
+			return nil, ErrSecretNotFound
 		}
-	} else {
-		// 模拟数据用于测试
-		return nil, fmt.Errorf("秘密不存在：%s", name)
+		return nil, fmt.Errorf("failed to get secret: %w", err)
 	}
 
 	// 解密数据
 	decryptedData := make(map[string]string)
-	for key, encryptedValue := range secret.Data {
-		decryptedValue, err := m.Decrypt(string(encryptedValue))
+	for key, value := range k8sSecret.Data {
+		decrypted, err := m.Decrypt(string(value))
 		if err != nil {
-			return nil, fmt.Errorf("解密值失败 [%s]: %w", key, err)
+			return nil, fmt.Errorf("failed to decrypt value for key '%s': %w", key, err)
 		}
-		decryptedData[key] = decryptedValue
-	}
-
-	description := ""
-	if desc, ok := secret.Annotations["description"]; ok {
-		description = desc
-	}
-
-	// 创建时间从元数据获取
-	createdAt := time.Now()
-	if secret.CreationTimestamp.Time.Unix() > 0 {
-		createdAt = secret.CreationTimestamp.Time
+		decryptedData[key] = decrypted
 	}
 
 	return &SecretData{
-		Name:        name,
-		Data:        decryptedData,
-		Description: description,
-		CreatedAt:   createdAt,
-		UpdatedAt:   createdAt,
+		Name:      k8sSecret.Name,
+		Namespace: k8sSecret.Namespace,
+		Data:      decryptedData,
+		CreatedAt: k8sSecret.CreationTimestamp.String(),
+		UpdatedAt: k8sSecret.CreationTimestamp.String(), // 简化处理
 	}, nil
 }
 
-// ListSecrets 列出所有秘密
-func (m *SecretManager) ListSecrets() ([]string, error) {
-	if m.clientset == nil {
-		return []string{}, nil
+// UpdateSecret 更新 Secret
+func (m *SecretManager) UpdateSecret(ctx context.Context, namespace, name string, data map[string]string) error {
+	// 先获取现有 Secret
+	existing, err := m.clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if k8sErrors.IsNotFound(err) {
+			return ErrSecretNotFound
+		}
+		return fmt.Errorf("failed to get existing secret: %w", err)
 	}
 
-	secrets, err := m.clientset.CoreV1().Secrets(m.namespace).List(nil, metav1.ListOptions{
-		LabelSelector: "managed=true",
+	// 加密新数据
+	encryptedData := make(map[string][]byte)
+	for key, value := range data {
+		encrypted, err := m.Encrypt(value)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt value for key '%s': %w", key, err)
+		}
+		encryptedData[key] = []byte(encrypted)
+	}
+
+	// 更新 Secret
+	existing.Data = encryptedData
+	_, err = m.clientset.CoreV1().Secrets(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update secret: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteSecret 删除 Secret
+func (m *SecretManager) DeleteSecret(ctx context.Context, namespace, name string) error {
+	err := m.clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil {
+		if k8sErrors.IsNotFound(err) {
+			return ErrSecretNotFound
+		}
+		return fmt.Errorf("failed to delete secret: %w", err)
+	}
+
+	return nil
+}
+
+// ListSecrets 列出命名空间中的所有 Secret（仅名称）
+func (m *SecretManager) ListSecrets(ctx context.Context, namespace string) ([]string, error) {
+	secrets, err := m.clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "managed-by=modelmagic-deploy-console",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("列出 Kubernetes Secrets 失败: %w", err)
+		return nil, fmt.Errorf("failed to list secrets: %w", err)
 	}
 
 	names := make([]string, len(secrets.Items))
@@ -272,72 +250,4 @@ func (m *SecretManager) ListSecrets() ([]string, error) {
 	}
 
 	return names, nil
-}
-
-// UpdateSecret 更新秘密
-func (m *SecretManager) UpdateSecret(name string, data map[string]string, description string) (*SecretData, error) {
-	var secret *corev1.Secret
-	var err error
-
-	if m.clientset != nil {
-		secret, err = m.clientset.CoreV1().Secrets(m.namespace).Get(nil, name, metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return nil, fmt.Errorf("秘密不存在：%s", name)
-			}
-			return nil, fmt.Errorf("获取 Kubernetes Secret 失败: %w", err)
-		}
-	} else {
-		return nil, fmt.Errorf("秘密不存在：%s", name)
-	}
-
-	// 加密所有数据值
-	encryptedData := make(map[string][]byte)
-	for key, value := range data {
-		encryptedValue, err := m.Encrypt(value)
-		if err != nil {
-			return nil, fmt.Errorf("加密值失败 [%s]: %w", key, err)
-		}
-		encryptedData[key] = []byte(encryptedValue)
-	}
-
-	// 更新数据
-	secret.Data = encryptedData
-	if secret.Annotations == nil {
-		secret.Annotations = make(map[string]string)
-	}
-	secret.Annotations["description"] = description
-
-	if m.clientset != nil {
-		_, err = m.clientset.CoreV1().Secrets(m.namespace).Update(nil, secret, metav1.UpdateOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("更新 Kubernetes Secret 失败: %w", err)
-		}
-	}
-
-	now := time.Now()
-	return &SecretData{
-		Name:        name,
-		Data:        data,
-		Description: description,
-		CreatedAt:   secret.CreationTimestamp.Time,
-		UpdatedAt:   now,
-	}, nil
-}
-
-// DeleteSecret 删除秘密
-func (m *SecretManager) DeleteSecret(name string) error {
-	if m.clientset == nil {
-		return nil
-	}
-
-	err := m.clientset.CoreV1().Secrets(m.namespace).Delete(nil, name, metav1.DeleteOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return fmt.Errorf("秘密不存在：%s", name)
-		}
-		return fmt.Errorf("删除 Kubernetes Secret 失败: %w", err)
-	}
-
-	return nil
 }
