@@ -1,7 +1,7 @@
 {
   "total": 1,
-  "success": ,
-  "failed": 1,
-  "last_build": "2026-04-16T02:26:08+08:00",
+  "success": 1,
+  "failed": ,
+  "last_build": "2026-04-16T02:31:29+08:00",
   "last_duration": "0秒"
 }
