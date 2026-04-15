@@ -15,6 +15,8 @@ PROJECT_DIR="/root/.openclaw/workspace/repos/modelmagic-deploy-console"
 LOG_FILE="${PROJECT_DIR}/auto-build.log"
 STATE_FILE="${PROJECT_DIR}/.auto-build-state"
 LOCK_FILE="${PROJECT_DIR}/.auto-build.lock"
+REPORT_SCRIPT="${PROJECT_DIR}/report-complete.sh"
+MONITOR_SCRIPT="${PROJECT_DIR}/monitor-status.sh"
 
 # 重试配置
 MAX_RETRIES=3
@@ -368,6 +370,10 @@ main() {
     error "环境检查失败"
     save_state "check_env" "failed"
     release_lock
+    # 调用失败上报
+    if [ -x "$REPORT_SCRIPT" ]; then
+      bash "$REPORT_SCRIPT" "failed" "check_env" 2>&1 | tee -a "$LOG_FILE"
+    fi
     return 1
   fi
   save_state "check_env" "success"
@@ -378,6 +384,9 @@ main() {
       error "后端编译失败"
       save_state "build_backend" "failed"
       release_lock
+      if [ -x "$REPORT_SCRIPT" ]; then
+        bash "$REPORT_SCRIPT" "failed" "build_backend" 2>&1 | tee -a "$LOG_FILE"
+      fi
       return 1
     fi
   fi
@@ -389,6 +398,9 @@ main() {
       error "前端编译失败"
       save_state "build_frontend" "failed"
       release_lock
+      if [ -x "$REPORT_SCRIPT" ]; then
+        bash "$REPORT_SCRIPT" "failed" "build_frontend" 2>&1 | tee -a "$LOG_FILE"
+      fi
       return 1
     fi
   fi
@@ -400,6 +412,9 @@ main() {
       error "测试失败"
       save_state "run_tests" "failed"
       release_lock
+      if [ -x "$REPORT_SCRIPT" ]; then
+        bash "$REPORT_SCRIPT" "failed" "run_tests" 2>&1 | tee -a "$LOG_FILE"
+      fi
       return 1
     fi
   fi
@@ -416,6 +431,13 @@ main() {
   save_state "completed" "success"
   
   release_lock
+  
+  # 调用完成上报
+  if [ -x "$REPORT_SCRIPT" ]; then
+    info "📊 生成构建报告..."
+    bash "$REPORT_SCRIPT" "success" "completed" 2>&1 | tee -a "$LOG_FILE"
+  fi
+  
   return 0
 }
 
