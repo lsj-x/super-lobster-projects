@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+	"regexp"
 )
 
 var (
@@ -244,24 +245,42 @@ func (a *API) startUpgrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
-	// 异步执行升级
-	go func() {
-		err := mmctlSvc.Upgrade(req.Namespace, req.Version, func(line string) {
-			logger.Info("Upgrade log", zap.String("line", line))
+
+	// 验证命名空间格式
+	if err := service.ValidateNamespace(req.Namespace); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid namespace: " + err.Error()})
+		return
+	}
+
+	// 验证版本号格式 (x.y.z)
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(req.Version) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version format (expected: x.y.z)"})
+		return
+	}
+
+	// 同步执行升级（等待完成）
+	logLines := []string{}
+	err := mmctlSvc.Upgrade(req.Namespace, req.Version, func(line string) {
+		logLines = append(logLines, line)
+		logger.Info("Upgrade log", zap.String("line", line))
+	})
+
+	if err != nil {
+		logger.Error("升级失败", zap.Error(err), zap.Strings("logs", logLines))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  err.Error(),
+			"logs":   logLines,
 		})
-		if err != nil {
-			logger.Error("升级失败", zap.Error(err))
-		}
-	}()
-	
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "升级已启动",
+		"message":   "升级成功",
 		"namespace": req.Namespace,
 		"version":   req.Version,
+		"logs":      logLines,
 	})
 }
-
 func (a *API) getAccess(c *gin.Context) {
 	name := c.Param("name")
 	url, err := mmctlSvc.GetSystemAccess(name)
