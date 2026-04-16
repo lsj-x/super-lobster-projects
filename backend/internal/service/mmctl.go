@@ -194,3 +194,63 @@ func isValidNamespaceName(name string) bool {
 	}
 	return true
 }
+
+// StreamLogs 实时流式获取命名空间或应用的日志
+// namespace: 命名空间名称
+// appName: 应用名称（可选，为空则获取该命名空间下所有 Pod 日志）
+// tailLines: 日志行数
+// follow: 是否持续跟踪
+func (s *MmctlService) StreamLogs(ctx context.Context, namespace, appName string, tailLines int, follow bool, callback LogCallback) error {
+	if namespace == "" {
+		return fmt.Errorf("namespace is required")
+	}
+
+	// 构建 kubectl logs 命令
+	args := []string{"logs"}
+	
+	if appName != "" {
+		// 如果是 Deployment/StatefulSet，需要加 -l app=appName
+		args = append(args, "-l", "app="+appName)
+	} else {
+		// 获取该命名空间下所有 Pod 的日志
+		args = append(args, "--all-namespaces=false")
+	}
+	
+	args = append(args, "--namespace", namespace)
+	
+	if tailLines > 0 {
+		args = append(args, "--tail", fmt.Sprintf("%d", tailLines))
+	}
+	
+	if follow {
+		args = append(args, "-f")
+	}
+
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd.Dir = s.workDir
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// 读取日志并回调
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		logger.Log.Debug("Log line", zap.String("line", line))
+		if callback != nil {
+			callback(line + "\n")
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading logs: %w", err)
+	}
+
+	return cmd.Wait()
+}
