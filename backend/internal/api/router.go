@@ -205,24 +205,36 @@ func (a *API) startRollback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
-	// 异步执行回滚
-	go func() {
-		err := mmctlSvc.Rollback(req.Namespace, req.Version, func(line string) {
-			logger.Info("Rollback log", zap.String("line", line))
+
+	// 验证命名空间格式
+	if err := service.ValidateNamespace(req.Namespace); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid namespace: " + err.Error()})
+		return
+	}
+
+	// 同步执行回滚（等待完成）
+	logLines := []string{}
+	err := mmctlSvc.Rollback(req.Namespace, req.Version, func(line string) {
+		logLines = append(logLines, line)
+		logger.Info("Rollback log", zap.String("line", line))
+	})
+
+	if err != nil {
+		logger.Error("回滚失败", zap.Error(err), zap.Strings("logs", logLines))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  err.Error(),
+			"logs":   logLines,
 		})
-		if err != nil {
-			logger.Error("回滚失败", zap.Error(err))
-		}
-	}()
-	
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "回滚已启动",
+		"message":   "回滚成功",
 		"namespace": req.Namespace,
 		"version":   req.Version,
+		"logs":      logLines,
 	})
 }
-
 func (a *API) startUpgrade(c *gin.Context) {
 	var req struct {
 		Namespace string `json:"namespace" binding:"required"`
