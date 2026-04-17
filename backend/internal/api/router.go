@@ -1,21 +1,22 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"modelmagic-deploy-console/backend/internal/config"
 	"modelmagic-deploy-console/backend/internal/logger"
 	"modelmagic-deploy-console/backend/internal/service"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
-	"regexp"
 )
 
 var (
-	mmctlSvc    *service.MmctlService
-	secretSvc   *service.SecretManager
-	upgrader    = websocket.Upgrader{
+	mmctlSvc  *service.MmctlService
+	secretSvc *service.SecretManager
+	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true // 允许所有来源，生产环境应限制
 		},
@@ -32,21 +33,20 @@ func NewAPI(cfg *config.Config) *API {
 		cfg.Mmctl.ScriptPath,
 		cfg.Mmctl.WorkDir,
 	)
-	
+
 	// 初始化 SecretManager（可能失败）
 	var err error
 	secretSvc, err = service.NewSecretManager(nil)
 	if err != nil {
 		logger.Warn("Failed to initialize SecretManager", zap.Error(err))
 	}
-	
 	return &API{cfg: cfg}
 }
 
 // SetupRoutes 设置路由
 func (a *API) SetupRoutes(r *gin.Engine) {
 	r.GET("/health", a.healthCheck)
-	
+
 	api := r.Group("/api/v1")
 	{
 		// 命名空间管理
@@ -55,23 +55,30 @@ func (a *API) SetupRoutes(r *gin.Engine) {
 		api.POST("/namespaces", a.createNamespace)
 		api.PUT("/namespaces/:name", a.updateNamespace)
 		api.DELETE("/namespaces/:name", a.deleteNamespace)
-		
+
 		// 安装/卸载/升级/回滚
 		api.POST("/install", a.startInstall)
 		api.POST("/uninstall", a.startUninstall)
 		api.POST("/rollback", a.startRollback)
 		api.POST("/upgrade", a.startUpgrade)
 		api.GET("/access/:name", a.getAccess)
-		
+
 		// Secret 管理
 		api.GET("/secrets", a.listSecretsHandler)
 		api.GET("/secrets/:namespace/:name", a.getSecretHandler)
 		api.POST("/secrets", a.createSecretHandler)
 		api.PUT("/secrets/:namespace/:name", a.updateSecretHandler)
 		api.DELETE("/secrets/:namespace/:name", a.deleteSecretHandler)
-		
+
 		// 实时日志 WebSocket
 		api.GET("/logs/ws", a.websocketLogs)
+		// 日志查询 REST API
+		api.GET("/logs", a.getLogs)
+		api.GET("/logs/pod", a.getPodLogs)
+		// 事件查询
+		api.GET("/events", a.getEvents)
+		// Pod 列表
+		api.GET("/pods", a.listPods)
 	}
 }
 
@@ -80,7 +87,6 @@ func (a *API) healthCheck(c *gin.Context) {
 }
 
 // ============ 命名空间管理 ============
-
 func (a *API) listNamespaces(c *gin.Context) {
 	namespaces, err := mmctlSvc.ListNamespaces()
 	if err != nil {
@@ -108,14 +114,12 @@ func (a *API) createNamespace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
 	if err := mmctlSvc.NewNamespace(req.Namespace); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusCreated, gin.H{
-		"message":   "命名空间配置已创建",
+		"message":  "命名空间配置已创建",
 		"namespace": req.Namespace,
 	})
 }
@@ -127,14 +131,12 @@ func (a *API) updateNamespace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
 	if err := mmctlSvc.UpdateNamespaceConfig(name, req); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "配置已更新",
+		"message":  "配置已更新",
 		"namespace": name,
 	})
 }
@@ -142,13 +144,12 @@ func (a *API) updateNamespace(c *gin.Context) {
 func (a *API) deleteNamespace(c *gin.Context) {
 	name := c.Param("name")
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "命名空间删除请求已接收",
+		"message": "命名空间删除请求已接收",
 		"namespace": name,
 	})
 }
 
 // ============ 安装/卸载/升级/回滚 ============
-
 func (a *API) startInstall(c *gin.Context) {
 	var req struct {
 		Namespace string `json:"namespace" binding:"required"`
@@ -158,7 +159,6 @@ func (a *API) startInstall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
 	// 异步执行安装
 	go func() {
 		err := mmctlSvc.Install(req.Namespace, req.Step, func(line string) {
@@ -168,11 +168,10 @@ func (a *API) startInstall(c *gin.Context) {
 			logger.Error("安装失败", zap.Error(err))
 		}
 	}()
-	
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "安装任务已启动",
+		"message":  "安装任务已启动",
 		"namespace": req.Namespace,
-		"step":      req.Step,
+		"step":     req.Step,
 	})
 }
 
@@ -185,14 +184,12 @@ func (a *API) startUninstall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
 	if err := mmctlSvc.Uninstall(req.Namespace, req.Step, nil); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "卸载完成",
+		"message":  "卸载完成",
 		"namespace": req.Namespace,
 	})
 }
@@ -206,36 +203,33 @@ func (a *API) startRollback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
 	// 验证命名空间格式
 	if err := service.ValidateNamespace(req.Namespace); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid namespace: " + err.Error()})
 		return
 	}
-
 	// 同步执行回滚（等待完成）
 	logLines := []string{}
 	err := mmctlSvc.Rollback(req.Namespace, req.Version, func(line string) {
 		logLines = append(logLines, line)
 		logger.Info("Rollback log", zap.String("line", line))
 	})
-
 	if err != nil {
 		logger.Error("回滚失败", zap.Error(err), zap.Strings("logs", logLines))
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":  err.Error(),
-			"logs":   logLines,
+			"error": err.Error(),
+			"logs":  logLines,
 		})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "回滚成功",
+		"message":  "回滚成功",
 		"namespace": req.Namespace,
 		"version":   req.Version,
-		"logs":      logLines,
+		"logs":     logLines,
 	})
 }
+
 func (a *API) startUpgrade(c *gin.Context) {
 	var req struct {
 		Namespace string `json:"namespace" binding:"required"`
@@ -245,42 +239,38 @@ func (a *API) startUpgrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
 	// 验证命名空间格式
 	if err := service.ValidateNamespace(req.Namespace); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid namespace: " + err.Error()})
 		return
 	}
-
 	// 验证版本号格式 (x.y.z)
 	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(req.Version) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version format (expected: x.y.z)"})
 		return
 	}
-
 	// 同步执行升级（等待完成）
 	logLines := []string{}
 	err := mmctlSvc.Upgrade(req.Namespace, req.Version, func(line string) {
 		logLines = append(logLines, line)
 		logger.Info("Upgrade log", zap.String("line", line))
 	})
-
 	if err != nil {
 		logger.Error("升级失败", zap.Error(err), zap.Strings("logs", logLines))
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":  err.Error(),
-			"logs":   logLines,
+			"error": err.Error(),
+			"logs":  logLines,
 		})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "升级成功",
+		"message":  "升级成功",
 		"namespace": req.Namespace,
 		"version":   req.Version,
-		"logs":      logLines,
+		"logs":     logLines,
 	})
 }
+
 func (a *API) getAccess(c *gin.Context) {
 	name := c.Param("name")
 	url, err := mmctlSvc.GetSystemAccess(name)
@@ -292,25 +282,21 @@ func (a *API) getAccess(c *gin.Context) {
 }
 
 // ============ Secret 管理 ============
-
 func (a *API) listSecretsHandler(c *gin.Context) {
 	namespace := c.Query("namespace")
 	if namespace == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace query parameter is required"})
 		return
 	}
-	
 	if secretSvc == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
 		return
 	}
-	
 	secrets, err := secretSvc.ListSecrets(c.Request.Context(), namespace)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusOK, gin.H{
 		"namespace": namespace,
 		"secrets":   secrets,
@@ -321,12 +307,10 @@ func (a *API) listSecretsHandler(c *gin.Context) {
 func (a *API) getSecretHandler(c *gin.Context) {
 	namespace := c.Param("namespace")
 	name := c.Param("name")
-	
 	if secretSvc == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
 		return
 	}
-	
 	secret, err := secretSvc.GetSecret(c.Request.Context(), namespace, name)
 	if err != nil {
 		if err == service.ErrSecretNotFound {
@@ -336,7 +320,6 @@ func (a *API) getSecretHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusOK, secret)
 }
 
@@ -350,26 +333,22 @@ func (a *API) createSecretHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
 	if secretSvc == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
 		return
 	}
-	
 	if err := service.ValidateNamespace(req.Namespace); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid namespace: " + err.Error()})
 		return
 	}
-	
 	err := secretSvc.CreateSecret(c.Request.Context(), req.Namespace, req.Name, req.Data)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusCreated, gin.H{
-		"message":   "Secret created successfully",
-		"name":      req.Name,
+		"message":  "Secret created successfully",
+		"name":     req.Name,
 		"namespace": req.Namespace,
 	})
 }
@@ -377,7 +356,6 @@ func (a *API) createSecretHandler(c *gin.Context) {
 func (a *API) updateSecretHandler(c *gin.Context) {
 	namespace := c.Param("namespace")
 	name := c.Param("name")
-	
 	var req struct {
 		Data map[string]string `json:"data" binding:"required,min=1"`
 	}
@@ -385,12 +363,10 @@ func (a *API) updateSecretHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
 	if secretSvc == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
 		return
 	}
-	
 	err := secretSvc.UpdateSecret(c.Request.Context(), namespace, name, req.Data)
 	if err != nil {
 		if err == service.ErrSecretNotFound {
@@ -400,10 +376,9 @@ func (a *API) updateSecretHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "Secret updated successfully",
-		"name":      name,
+		"message":  "Secret updated successfully",
+		"name":     name,
 		"namespace": namespace,
 	})
 }
@@ -411,12 +386,10 @@ func (a *API) updateSecretHandler(c *gin.Context) {
 func (a *API) deleteSecretHandler(c *gin.Context) {
 	namespace := c.Param("namespace")
 	name := c.Param("name")
-	
 	if secretSvc == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "SecretManager not initialized"})
 		return
 	}
-	
 	err := secretSvc.DeleteSecret(c.Request.Context(), namespace, name)
 	if err != nil {
 		if err == service.ErrSecretNotFound {
@@ -426,16 +399,14 @@ func (a *API) deleteSecretHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "Secret deleted successfully",
-		"name":      name,
+		"message":  "Secret deleted successfully",
+		"name":     name,
 		"namespace": namespace,
 	})
 }
 
 // ============ WebSocket 日志 ============
-
 func (a *API) websocketLogs(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -443,13 +414,123 @@ func (a *API) websocketLogs(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
-	
-	// 保持连接
+
+	// 保持连接，等待客户端消息
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		// 实际实现需要订阅日志通道并推送
+		// TODO: 订阅日志通道并推送
 	}
+}
+
+// getLogs 获取命名空间的应用日志 (REST API)
+func (a *API) getLogs(c *gin.Context) {
+	namespace := c.Query("namespace")
+	appName := c.Query("app")
+	tailLines := 100
+	if tl := c.Query("tail"); tl != "" {
+		fmt.Sscanf(tl, "%d", &tailLines)
+	}
+
+	if namespace == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace query parameter is required"})
+		return
+	}
+
+	logLines := []string{}
+	err := mmctlSvc.StreamLogs(c.Request.Context(), namespace, appName, tailLines, false, func(line string) {
+		logLines = append(logLines, line)
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"namespace": namespace,
+		"app":       appName,
+		"logs":      logLines,
+		"count":     len(logLines),
+	})
+}
+
+// getPodLogs 获取特定 Pod 的日志
+func (a *API) getPodLogs(c *gin.Context) {
+	namespace := c.Query("namespace")
+	podName := c.Query("pod")
+	container := c.Query("container")
+	tailLines := 100
+	if tl := c.Query("tail"); tl != "" {
+		fmt.Sscanf(tl, "%d", &tailLines)
+	}
+
+	if namespace == "" || podName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace and pod query parameters are required"})
+		return
+	}
+
+	logs, err := mmctlSvc.GetPodLogs(c.Request.Context(), namespace, podName, container, tailLines)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"namespace": namespace,
+		"pod":       podName,
+		"container": container,
+		"logs":      logs,
+	})
+}
+
+// getEvents 获取命名空间的事件
+func (a *API) getEvents(c *gin.Context) {
+	namespace := c.Query("namespace")
+	limit := 50
+	if l := c.Query("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	typeFilter := c.Query("type") // Normal, Warning, or empty
+
+	if namespace == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace query parameter is required"})
+		return
+	}
+
+	events, err := mmctlSvc.GetEvents(c.Request.Context(), namespace, limit, typeFilter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"namespace": namespace,
+		"events":    events,
+		"count":     len(events),
+	})
+}
+
+// listPods 列出命名空间下的所有 Pod
+func (a *API) listPods(c *gin.Context) {
+	namespace := c.Query("namespace")
+
+	if namespace == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace query parameter is required"})
+		return
+	}
+
+	pods, err := mmctlSvc.ListPods(c.Request.Context(), namespace)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"namespace": namespace,
+		"pods":      pods,
+		"count":     len(pods),
+	})
 }
