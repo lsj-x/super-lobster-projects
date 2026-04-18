@@ -286,6 +286,120 @@ scale() {
   fi
 }
 
+
+# 92 - 启用 HPA 自动扩缩容
+enable_hpa() {
+  local namespace=$1
+  local min_replicas=${2:-1}
+  local max_replicas=${3:-10}
+  local cpu_threshold=${4:-80}
+  
+  log_info "为命名空间 $namespace 启用 HPA (min: $min_replicas, max: $max_replicas, CPU: ${cpu_threshold}%)"
+  
+  # 参数验证
+  if [ -z "$namespace" ]; then
+    log_error "命名空间不能为空"
+    exit 1
+  fi
+  
+  # 检查 kubectl 是否可用
+  if ! command -v kubectl &> /dev/null; then
+    log_error "kubectl 未安装"
+    exit 1
+  fi
+  
+  # 检查 metrics-server 是否可用
+  if ! kubectl top pods -n "$namespace" &> /dev/null; then
+    log_error "无法获取指标，请确保 metrics-server 已安装"
+    exit 1
+  fi
+  
+  # 创建 HPA 配置
+  local hpa_yaml="apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: modelmagic-hpa
+  namespace: $namespace
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: modelmagic-service
+  minReplicas: $min_replicas
+  maxReplicas: $max_replicas
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: $cpu_threshold
+"
+  
+  # 应用 HPA 配置
+  echo "$hpa_yaml" | kubectl apply -f -
+  
+  if [ $? -eq 0 ]; then
+    log_info "HPA 启用成功：$namespace"
+    echo "SUCCESS: HPA enabled for $namespace"
+    # 显示 HPA 状态
+    kubectl get hpa modelmagic-hpa -n "$namespace"
+  else
+    log_error "HPA 启用失败"
+    exit 1
+  fi
+}
+
+# 93 - 禁用 HPA (回退到手动缩放)
+disable_hpa() {
+  local namespace=$1
+  
+  log_info "禁用命名空间 $namespace 的 HPA"
+  
+  # 参数验证
+  if [ -z "$namespace" ]; then
+    log_error "命名空间不能为空"
+    exit 1
+  fi
+  
+  # 检查 kubectl 是否可用
+  if ! command -v kubectl &> /dev/null; then
+    log_error "kubectl 未安装"
+    exit 1
+  fi
+  
+  # 删除 HPA 配置
+  kubectl delete hpa modelmagic-hpa -n "$namespace" --ignore-not-found
+  
+  log_info "HPA 已禁用，建议手动设置副本数"
+  echo "SUCCESS: HPA disabled for $namespace"
+}
+
+# 94 - 查看 HPA 状态
+get_hpa_status() {
+  local namespace=$1
+  
+  log_info "查询命名空间 $namespace 的 HPA 状态"
+  
+  # 参数验证
+  if [ -z "$namespace" ]; then
+    log_error "命名空间不能为空"
+    exit 1
+  fi
+  
+  # 检查 kubectl 是否可用
+  if ! command -v kubectl &> /dev/null; then
+    log_error "kubectl 未安装"
+    exit 1
+  fi
+  
+  # 显示 HPA 详细信息
+  kubectl get hpa modelmagic-hpa -n "$namespace" -o wide
+  echo ""
+  echo "详细状态:"
+  kubectl describe hpa modelmagic-hpa -n "$namespace"
+}
+
 # 主函数 - 路由命令
 main() {
   local command=$1
@@ -301,6 +415,9 @@ main() {
     "89") upgrade "$@" ;;
     "90") rollback "$@" ;;
     "91") scale "$@" ;;
+  "92") enable_hpa "$@" ;;
+  "93") disable_hpa "$@" ;;
+  "94") get_hpa_status "$@" ;;
     *)
       echo "Usage: $0 <command> [args...]"
       echo "Commands:"
@@ -312,7 +429,10 @@ main() {
       echo "  88 - Uninstall"
       echo "  89 - Upgrade"
       echo "  90 - Rollback"
-      echo "  91 - Scale"
+    echo " 91 - Scale (手动扩缩容)"
+    echo " 92 - Enable HPA (自动扩缩容)"
+    echo " 93 - Disable HPA"
+    echo " 94 - Get HPA Status"
       exit 1
       ;;
   esac
